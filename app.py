@@ -8,7 +8,7 @@ Sections:
 - 1.1 Income Analysis (Static maps)
 - 1.2 Gap and Accessibility Analysis (Static maps + Formula)
 - 1.3 Electrified Miles Estimation
-- 1.4 Willingness to Pay Analysis (Interactive with parameter controls)
+- 1.4 Willingness to Pay for the DCFC Network (per BEV, with sensitivity controls)
 """
 
 import streamlit as st
@@ -287,69 +287,69 @@ def load_image_placeholder(width=600, height=400, text="Image Placeholder"):
     return fig
 
 # =============================================================================
-# WTP MODEL FUNCTIONS
+# WTP MODEL (DCFC network; single-pass minimum-detour, Greene Eq. 17)
+# Source: dcfc_wtp_detour_rerun_with_delta_curves notebook (final results).
+# WTP per BEV = Delta_M * net_per_mile * D(r,15) / N_passenger
 # =============================================================================
 
 UIUC_BLUE = "#122a4b"
 UIUC_ORANGE = "#d83404"
 
-a_stations = 93.222
-b_stations = 0.75
-M_j = 4.310773e9
+WTP_VOT = 20.0            # value of time, $/hr (w)
+WTP_KWH_PER_MI = 0.32     # energy use, kWh/mi (e)
+WTP_DCFC_KW = 150.0       # DCFC power, kW (d)
+WTP_DETOUR_MPH = 35.0     # detour speed, mph (u)
+WTP_N_PASSENGER = 7.1e6   # passenger vehicles behind the OD matrix
+WTP_T_YEARS = 15
+WTP_C_CHARGE_BASE = WTP_VOT * WTP_KWH_PER_MI / WTP_DCFC_KW   # $/mi before s_DCFC
 
-w = 20.0
-theta = 0.8
-e = 0.32
-d = 150
-K_base = 0.1536
-a_access_base = 1.0
-N_gas_base = 3670
+# Per detour buffer delta (mi): enabled annual VMT (Delta_M), share of enabled
+# miles beyond initial range (s_DCFC), and VMT-weighted detour ratio (r_detour).
+WTP_BY_DELTA = {
+    0.1:  dict(dM=3_977_954_439.870156, s_dcfc=0.2518, r_detour=2.8665456149012626e-05),
+    1.0:  dict(dM=6_638_038_558.212712, s_dcfc=0.2545, r_detour=0.0007106584171871601),
+    2.0:  dict(dM=7_933_392_364.061326, s_dcfc=0.2640, r_detour=0.0013929199176437846),
+    5.0:  dict(dM=8_538_373_381.510010, s_dcfc=0.2645, r_detour=0.002024709336412145),
+    10.0: dict(dM=8_750_067_762.593248, s_dcfc=0.2651, r_detour=0.002619178576543419),
+}
+WTP_BASE = dict(v=0.50, r=0.03, delta=2.0)   # headline case (matches final slide)
 
-N0 = 1
 
-def coverage_fraction(N):
-    N = np.asarray(N, dtype=float)
-    return (a_stations + b_stations * np.log(N)) / 100.0
+def calculate_discount_factor(r, T=WTP_T_YEARS):
+    """D(r,T) = sum_{t=1..T} (1+r)^-t, rounded to 2 dp as in the notebook (11.94 at 3%)."""
+    return round((1 - (1 + r) ** -T) / r, 2)
 
-f0 = float(coverage_fraction(N0))
 
-def calculate_discount_factor(r, T=15):
-    return (1 - (1/(1+r))**T) / r
+def wtp_net_per_mile(v, delta):
+    p = WTP_BY_DELTA[delta]
+    c_charge = WTP_C_CHARGE_BASE * p["s_dcfc"]
+    c_detour = (WTP_VOT / WTP_DETOUR_MPH) * p["r_detour"]
+    return v - c_charge - c_detour, c_charge, c_detour
 
-def calculate_cost(N, R=250, K=K_base, a=a_access_base, N_gas=N_gas_base):
-    N = np.asarray(N, dtype=float)
-    phi = N / N_gas
-    access_cost = K * (phi**a - 1)
-    charging_time = (theta * R * e) / d
-    cost_per_mile = (w / (theta * R)) * (access_cost + charging_time)
-    return cost_per_mile
 
-def net_value_per_mile(N, v, R=250, K=K_base, a=a_access_base, N_gas=N_gas_base):
-    return v - calculate_cost(N, R, K, a, N_gas)
+def wtp_per_bev(v=WTP_BASE["v"], r=WTP_BASE["r"], delta=WTP_BASE["delta"], D=None):
+    net, _, _ = wtp_net_per_mile(v, delta)
+    D = calculate_discount_factor(r) if D is None else D
+    return WTP_BY_DELTA[delta]["dM"] * net * D / WTP_N_PASSENGER
 
-def calculate_WTP(N, v, r, R=250, K=K_base, a=a_access_base, N_gas=N_gas_base, T=15):
-    N = np.asarray(N, dtype=float)
-    delta_f = coverage_fraction(N) - f0
-    D_j = calculate_discount_factor(r, T)
-    net_value = net_value_per_mile(N, v, R, K, a, N_gas)
-    WTP = delta_f * M_j * net_value * D_j
-    return np.maximum(WTP, 0.0)
 
-def calculate_marginal_WTP(N, v, r, R=250, K=K_base, a=a_access_base, N_gas=N_gas_base, T=15):
-    N = np.asarray(N, dtype=float)
-    D_j = calculate_discount_factor(r, T)
-    cost = calculate_cost(N, R, K, a, N_gas)
-    net_value = v - cost
+# Expected random-prefix VMT coverage curve (delta = 2 mi, multi-charge rule "all")
+COVERAGE_CURVE_CSV = "data/coverage/delta_coverage_curves_all.csv"
+COVERAGE_FITS_CSV = "data/coverage/delta_coverage_curve_fits_all.csv"
+COVERAGE_DELTA = 2
 
-    phi = N / N_gas
-    dC_dN = (w / (theta * R)) * K * a * (phi**(a-1)) / N_gas
 
-    log_ratio = np.log(N / N0)
-    term1 = (b_stations / N) * net_value
-    term2 = b_stations * log_ratio * (-dC_dN)
-
-    marginal_WTP = M_j * D_j * (term1 + term2)
-    return marginal_WTP
+@st.cache_data
+def load_coverage_curve(delta=COVERAGE_DELTA):
+    """Return (curve_df, fit_row). curve_df: N_stations, coverage_pct, enabled_vmt (annual)."""
+    cur = pd.read_csv(COVERAGE_CURVE_CSV)
+    cur = cur[cur["delta_mi"] == delta].sort_values("N_nodes").copy()
+    cur["N_stations"] = cur["N_stations_equiv"]
+    cur["coverage_pct"] = cur["vmt_coverage_pct"]
+    cur["enabled_vmt"] = cur["single_expected_vmt"] + cur["multi_expected_vmt"]
+    fit = pd.read_csv(COVERAGE_FITS_CSV)
+    fit = fit[fit["delta_mi"] == delta].iloc[0]
+    return cur[["N_nodes", "N_stations", "coverage_pct", "enabled_vmt"]].reset_index(drop=True), fit
 
 def centered_image_fixed(path, width, placeholder_text, ph_h=375):
     """Display an image in a consistently centered container"""
@@ -410,7 +410,7 @@ outcomes of expanding Illinois&apos; EV charging network.
 <p style="margin: 0.6rem 0 0.2rem 0;"><b>1.1.</b> Data integration: charging, demographic, and spatial inputs</p>
 <p style="margin: 0.2rem 0;"><b>1.2.</b> Accessibility gaps: tract-level inaccessibility with spillover capacity</p>
 <p style="margin: 0.2rem 0;"><b>1.3.</b> Electrified VMT: additional electrified miles enabled by DCFC expansion</p>
-<p style="margin: 0.2rem 0 0.6rem 0;"><b>1.4.</b> Willingness to pay: access improvements translated into consumer benefits</p>
+<p style="margin: 0.2rem 0 0.6rem 0;"><b>1.4.</b> Willingness to pay: the value of DCFC access per battery EV</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1029,45 +1029,31 @@ def render_13_text():
     st.markdown('<div class="section-header">1.3 Electrified Miles Estimation</div>',
                 unsafe_allow_html=True)
     st.markdown("""
-Next, we wanted to understand how much the charging network actually expands what an EV can do.
-To get there, we first asked: if there were no public DCFC stations at all, how many of Illinois's
-daily trips could someone still complete in a battery EV, just on a home charge? That gives us
-a baseline, meaning the trips short enough to be feasible with no public charging at all. Every
-station we add on top of that baseline makes some previously-infeasible trips now doable, and
-the miles from those newly-enabled trips are what we call <b>electrified miles</b>.
+Next, we asked how much the DCFC network expands what a battery EV can do. Without any public
+fast charging, trips within a vehicle's starting range are already feasible; they cover
+<b>94.57%</b> of annual Illinois VMT and form the baseline. Each added DCFC station makes some
+longer trips feasible (within a 2-mile detour), and the miles from those newly enabled trips are
+<b>electrified miles</b>.
 <br><br>
-We ran 10 simulations at each network size $N$ and averaged the results. They fit a logarithmic
-curve, $f(N) = 0.75\\ln(N) + 93.1$ ($R^2 = 0.8132$): the first few hundred stations unlock
-the highest-traffic corridors and produce the biggest jumps, while later additions reach into
-lower-demand areas where the marginal gain is smaller. This is why the curve flattens. It is not
-because charging stops mattering, but because the easy wins are already captured.
+The curve shows expected VMT coverage when stations are added in random order, up to today's
+348 DCFC stations (99.19%). It follows $f(N) = 94.57 + 1.76\\ln(1 + N/27.9)$ ($R^2 = 0.9999$):
+the first stations unlock the busiest corridors, and later additions add less because the
+easy wins are already captured.
 """, unsafe_allow_html=True)
 
 
 def render_14_text():
     st.markdown('<div id="section-14"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-header">1.4 Willingness to Pay (Per Traveler)</div>',
+    st.markdown('<div class="section-header">1.4 Willingness to Pay for the DCFC Network (Per BEV)</div>',
                 unsafe_allow_html=True)
     st.markdown("""
-Finally, we put a dollar value on what the network expansion is actually worth to drivers.
-The willingness to pay (WTP) figure is built up from three separate sources of benefit that
-charging access creates:
-<ul>
-  <li><b>Fuel cost savings:</b> every electrified mile is a mile not paid for at the gas pump.
-  We net out the electricity cost, so this captures the real take-home saving per mile driven electrically.</li>
-  <li><b>Time and detour savings:</b> without nearby charging, drivers either reroute significantly
-  to find a station or cut trips short. More stations mean less of that detour overhead, and
-  we translate the saved travel time into dollars using a standard value-of-time.</li>
-  <li><b>Charging access value:</b> some trips are simply not possible in a BEV without a station
-  along the way. This component captures the benefit of trips that go from impossible to feasible,
-  which is especially significant for longer inter-regional and rural corridors.</li>
-</ul>
-We sum these three components across all Illinois BEV drivers and discount them over the vehicle
-lifetime. The benefit per traveler is highest when stations are scarce, because each new one unlocks
-a lot of previously-infeasible trips. It drops off as the network fills in, which is consistent with
-what we saw in section 1.3. We tested per-mile values from \\$0.35 to \\$0.64, and the shaded band
-shows how sensitive the total estimate is to that assumption.
+We value the Illinois DCFC network by the trips it makes feasible for battery EVs. For every
+origin–destination trip longer than a vehicle's starting range, we find the charging station that
+requires the smallest detour; the trip counts as <b>enabled</b> if that detour is within a buffer
+δ (2 miles in the base case). Enabled annual VMT is valued at <i>v</i> per mile, net of charging-time
+and detour costs, discounted over a 15-year vehicle lifetime, and expressed per vehicle.
 """, unsafe_allow_html=True)
+    st.latex(r"\text{WTP per BEV} = \frac{\Delta M \cdot (v - C_{\text{charge}} - C_{\text{detour}}) \cdot D(r, 15)}{N_{\text{passenger}}}")
 
 
 # =============================================================================
@@ -1569,8 +1555,16 @@ def render_12():
                 )
                 norm_lr = TwoSlopeNorm(vmin=-2, vcenter=0, vmax=2)
 
-                # Keep visual size but render at higher DPI for sharper output
-                fig_lr, ax_lr = plt.subplots(1, 1, figsize=(8, 5), dpi=200)
+                # Illinois-centred Transverse Mercator so the state is upright (UTM 16N tilts it)
+                IL_TM = ("+proj=tmerc +lat_0=36.5 +lon_0=-89.25 +k=1 "
+                         "+x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs")
+                tracts_lr = tracts_lr.to_crs(IL_TM)
+                future_gdf_m = future_gdf_m.to_crs(IL_TM)
+                if roads_gdf is not None:
+                    roads_gdf = roads_gdf.to_crs(IL_TM)
+
+                # Portrait canvas, equal aspect: Illinois is taller than wide
+                fig_lr, ax_lr = plt.subplots(1, 1, figsize=(6.2, 7), dpi=200)
                 tracts_lr["log_ratio_change"] = pd.to_numeric(tracts_lr["log_ratio_change"], errors="coerce")
                 missing_lr = tracts_lr[tracts_lr["log_ratio_change"].isna()]
                 non_missing_lr = tracts_lr[tracts_lr["log_ratio_change"].notna()]
@@ -1624,33 +1618,32 @@ def render_12():
                 # Colorbar for log ratio: much smaller, no label (title deleted)
                 sm = plt.cm.ScalarMappable(cmap=cmap_lr, norm=norm_lr)
                 sm.set_array([])
-                cbar = fig_lr.colorbar(sm, ax=ax_lr, shrink=0.45, fraction=0.035, aspect=28, pad=0.06)
-                cbar.ax.tick_params(labelsize=5)
+                cax = ax_lr.inset_axes([1.02, 0.05, 0.035, 0.38])
+                cbar = fig_lr.colorbar(sm, cax=cax)
+                cbar.ax.tick_params(labelsize=7)
+                cbar.set_label("Log ratio change", fontsize=7.5)
                 legend_patches = [mpatches.Patch(color=no_data_grey, edgecolor="none", label="No data")]
                 if roads_gdf is not None and len(roads_gdf) > 0:
                     legend_patches.append(mpatches.Patch(color=interstate_dark_grey, edgecolor="none", label="Interstate Routes"))
                 for t in type_order:
                     if len(future_gdf_m[future_gdf_m["station_type"] == t]) > 0:
                         legend_patches.append(mpatches.Patch(color=point_colors.get(t, "gray"), label=t))
-                # Legend: compact row above the map for a cleaner look
+                # Legend to the right of the map, above the colorbar
                 ax_lr.legend(
                     handles=legend_patches,
-                    loc="lower center",
-                    bbox_to_anchor=(0.5, 1.02),
+                    loc="upper left",
+                    bbox_to_anchor=(1.0, 0.98),
                     frameon=False,
-                    fontsize=6,
-                    ncol=4,
-                    handlelength=0.9,
-                    borderpad=0.2,
-                    labelspacing=0.4,
-                    columnspacing=0.8,
+                    fontsize=7.5,
+                    handlelength=1.0,
+                    labelspacing=0.6,
                 )
-                # Fill the landscape canvas with Illinois — no equal-aspect so portrait state fits 8×5
-                ax_lr.margins(x=0.03, y=0.03)
+                ax_lr.set_aspect("equal")
+                ax_lr.margins(x=0.02, y=0.02)
                 ax_lr.set_axis_off()
-                plt.tight_layout(rect=[0, 0.10, 1, 0.98])
-                # Display at 70% of container width
-                _lc, _lm, _lr = st.columns([0.15, 0.70, 0.15])
+                fig_lr.subplots_adjust(left=0.01, right=0.68, top=0.99, bottom=0.01)
+                # Display at ~50% of container width
+                _lc, _lm, _lr = st.columns([0.25, 0.50, 0.25])
                 with _lm:
                     st.pyplot(fig_lr, width="stretch")
                 st.markdown(
@@ -1698,125 +1691,67 @@ def render_13():
     st.markdown('<div id="appendix-13"></div>', unsafe_allow_html=True)
     st.markdown("#### Electrified VMT Coverage")
 
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
+    curve, fit = load_coverage_curve()
+    a_fit, b_fit, c_fit = float(fit["baseline_pct"]), float(fit["b_stations"]), float(fit["c_stations"])
+    r2 = float(fit["r_squared_nodes"])
+    n_max = float(curve["N_stations"].max())
 
-    raw_path = "data/incremental_results_raw_副本.csv"  # raw 10-run results
-    df = pd.read_csv(raw_path)
+    # Marker points at the same network sizes as the notebook figure
+    pts = curve[curve["N_nodes"].isin([1, 2, 3, 5, 10, 20, 50, 100, 150, 200, int(curve["N_nodes"].max())])]
+    x_fit = np.linspace(0, n_max, 400)
+    y_fit = a_fit + b_fit * np.log1p(x_fit / c_fit)
 
-    # Mean across 10 runs for each N (matches lead's instruction)
-    agg = (
-        df.groupby("N")
-          .agg(
-              mean_vmt=("vmt_coverage_%", "mean"),
-              std_vmt=("vmt_coverage_%", "std"),
-              n_runs=("repeat", "nunique"),
-          )
-          .reset_index()
-          .sort_values("N")
-    )
-
-    # --- Fitted curve from the figure (in %) ---
-    # y = 0.75 ln(x) + 93.1  (ln(0) undefined, so draw curve for x >= 1)
-    x_curve = np.arange(1, int(agg["N"].max()) + 1)
-    y_curve = 0.75 * np.log(x_curve) + 93.1
-
-    # --- Plot ---
     fig = go.Figure()
-
-    # Gray hollow points (mean values)
     fig.add_trace(go.Scatter(
-        x=agg["N"],
-        y=agg["mean_vmt"],
-        mode="markers",
-        name="Simulation mean (10 runs)",
-        marker=dict(
-            size=8,
-            color="white",  # white fill
-            line=dict(color="rgba(140,140,140,1)", width=2),  # gray outline
-        ),
-        hovertemplate=(
-            "N: %{x}<br>"
-            "Mean VMT coverage: %{y:.3f}%<br>"
-            "Std (10 runs): %{customdata[0]:.3f}<br>"
-            "Runs: %{customdata[1]}<extra></extra>"
-        ),
-        customdata=np.column_stack([
-            agg["std_vmt"].fillna(0),
-            agg["n_runs"],
-        ]),
-        showlegend=False,  # to match static figure
+        x=[0, n_max * 1.06], y=[a_fit, a_fit], mode="lines",
+        line=dict(color="rgba(140,140,140,1)", width=1.5, dash="dash"),
+        hoverinfo="skip", showlegend=False,
     ))
-
-    # Black fitted curve
     fig.add_trace(go.Scatter(
-        x=x_curve,
-        y=y_curve,
-        mode="lines",
-        line=dict(color="black", width=3),
-        hovertemplate="Fitted curve<br>N: %{x}<br>VMT coverage: %{y:.3f}%<extra></extra>",
+        x=x_fit, y=y_fit, mode="lines", line=dict(color="black", width=3),
+        hovertemplate="Fitted curve<br>N: %{x:.0f}<br>VMT coverage: %{y:.3f}%<extra></extra>",
         showlegend=False,
     ))
-
-    # Red baseline dot: use N=0 if it exists, otherwise first N
-    if (agg["N"] == 0).any():
-        base_row = agg.loc[agg["N"] == 0].iloc[0]
-        x0, y0 = 0, float(base_row["mean_vmt"])
-    else:
-        base_row = agg.iloc[0]
-        x0, y0 = int(base_row["N"]), float(base_row["mean_vmt"])
-
     fig.add_trace(go.Scatter(
-        x=[x0],
-        y=[y0],
-        mode="markers",
-        marker=dict(size=12, color="red"),
-        hovertemplate="Baseline<br>N: %{x}<br>VMT coverage: %{y:.3f}%<extra></extra>",
+        x=pts["N_stations"], y=pts["coverage_pct"], mode="markers",
+        marker=dict(size=8, color="white", line=dict(color="rgba(140,140,140,1)", width=2)),
+        hovertemplate="N: %{x:.0f}<br>Expected VMT coverage: %{y:.3f}%<extra></extra>",
         showlegend=False,
     ))
-
-    # Equation + R^2 annotation (positioned like the figure)
+    fig.add_trace(go.Scatter(
+        x=[0], y=[a_fit], mode="markers", marker=dict(size=12, color="red"),
+        hovertemplate="Baseline (no public DCFC)<br>VMT coverage: %{y:.2f}%<extra></extra>",
+        showlegend=False,
+    ))
     fig.add_annotation(
-        x=350, y=94.2,  # tweak if you want exact placement
-        text="y=0.75ln(x)+93.1<br>R<sup>2</sup>=0.8132",
-        showarrow=False,
-        font=dict(color="rgba(80,80,80,1)", size=14),
-        align="left",
+        x=n_max * 0.97, y=a_fit + 0.55, xanchor="right",
+        text=f"y = {a_fit:.2f} + {b_fit:.2f} ln(1 + N/{c_fit:.1f})<br>R<sup>2</sup> = {r2:.4f}",
+        showarrow=False, font=dict(color="rgba(80,80,80,1)", size=14), align="right",
     )
-
-    # Layout to mimic the static plot
+    fig.add_annotation(
+        x=n_max * 0.97, y=a_fit + 0.12, xanchor="right", text=f"baseline = {a_fit:.2f}%",
+        showarrow=False, font=dict(color="rgba(120,120,120,1)", size=12),
+    )
     fig.update_layout(
         template="plotly_white",
         height=560,
         margin=dict(l=80, r=40, t=10, b=70),
-        xaxis=dict(
-            title="Number of Charging Stations",
-            range=[-10, max(agg["N"].max(), 800) + 20],
-            showgrid=True,
-            gridcolor="rgba(220,220,220,1)",
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="VMT Coverage (%)",
-            range=[93, 101],  # matches figure's look
-            showgrid=True,
-            gridcolor="rgba(220,220,220,1)",
-            zeroline=False,
-        ),
+        xaxis=dict(title="Number of DCFC Stations", range=[-8, n_max * 1.08],
+                   showgrid=True, gridcolor="rgba(220,220,220,1)", zeroline=False),
+        yaxis=dict(title="VMT Coverage (%)", range=[94, 100],
+                   showgrid=True, gridcolor="rgba(220,220,220,1)", zeroline=False),
     )
-
     st.plotly_chart(fig, width="stretch")
+    st.caption("Figure 5. Expected electrified VMT coverage vs. number of DCFC stations (2-mile detour buffer; "
+               "a multi-stop trip counts only when all of its charging stops are in the network).")
 
-    st.caption("Figure 5. Electrified VMT coverage relationship used to quantify mobility impacts of DCFC expansion.")
 
 def render_14():
     st.markdown('<div id="appendix-14"></div>', unsafe_allow_html=True)
-    # Baseline values
-    v_baseline = 0.50
-    r_baseline = 7.0
-    R_baseline = 250
-    N_baseline = 348
+    # Baseline values (final results)
+    v_baseline = WTP_BASE["v"]
+    r_baseline = WTP_BASE["r"] * 100
+    delta = WTP_BASE["delta"]
 
     v_value = st.slider("Value per mile (v), $/mi", 0.25, 0.64, v_baseline, 0.01)
     v_is_baseline = abs(v_value - v_baseline) < 0.001
@@ -1835,32 +1770,21 @@ def render_14():
         unsafe_allow_html=True
     )
 
-    # BEV range (R) is fixed at baseline value of 250 miles
-    R_value = R_baseline  # Fixed at 250 miles
+    # Expected enabled VMT along the coverage curve (delta = 2 mi, rule "all"), up to today's network
+    curve, _ = load_coverage_curve(COVERAGE_DELTA)
+    N_grid = curve["N_stations"].values
+    dM_grid = curve["enabled_vmt"].values
+    N_current = int(round(N_grid.max()))          # 348 DCFC stations
+    D = calculate_discount_factor(r)
 
-    N_current = st.slider("Current DCFC stations (N)", 50, 500, N_baseline, 1)
-    N_is_baseline = abs(N_current - N_baseline) < 1
-    st.markdown(
-        f"<div style='font-size:0.75rem; color:{'#d83404' if not N_is_baseline else '#666'}; margin-top:-0.5rem; margin-bottom:0.5rem;'>"
-        f"{'🔴 Baseline: ' if not N_is_baseline else 'Baseline: '}{N_baseline} stations</div>",
-        unsafe_allow_html=True
-    )
+    def per_bev(v):
+        net, _, _ = wtp_net_per_mile(v, delta)
+        return dM_grid * net * D / WTP_N_PASSENGER
 
-    N_BEVs_base = 94303
-
-    N_grid = np.arange(1, 501)
-
-    wtp_base = calculate_WTP(N_grid, v=v_value, r=r, R=R_value)
-    wtp_low  = calculate_WTP(N_grid, v=0.35,   r=r, R=R_value)
-    wtp_high = calculate_WTP(N_grid, v=0.64,   r=r, R=R_value)
-
-    per_base = wtp_base / N_BEVs_base
-    per_low  = wtp_low  / N_BEVs_base
-    per_high = wtp_high / N_BEVs_base
-
-    per_current = float(calculate_WTP(N_current, v=v_value, r=r, R=R_value) / N_BEVs_base)
-    per_current_low  = float(calculate_WTP(N_current, v=0.35, r=r, R=R_value) / N_BEVs_base)
-    per_current_high = float(calculate_WTP(N_current, v=0.64, r=r, R=R_value) / N_BEVs_base)
+    per_base = per_bev(v_value)
+    per_low = per_bev(0.35)
+    per_high = per_bev(0.64)
+    per_current, per_current_low, per_current_high = per_base[-1], per_low[-1], per_high[-1]
 
     fig = go.Figure()
 
@@ -1909,17 +1833,17 @@ def render_14():
         text=f"Current N={N_current}<br>${per_current:,.0f}/BEV",
         showarrow=True,
         arrowhead=2,
-        ax=60, ay=-40,
+        ax=-90, ay=60,
         bgcolor="rgba(255,255,255,0.85)",
         bordercolor="rgba(232, 74, 39, 0.9)",
         borderwidth=1
     )
 
     fig.update_layout(
-        title=dict(text="WTP per Traveler vs DCFC Stations (Illinois)", font=dict(size=22, color="#E8572A"), pad=dict(b=20)),
+        title=dict(text="WTP per BEV vs DCFC Stations (Illinois)", font=dict(size=22, color="#E8572A"), pad=dict(b=20)),
         xaxis_title=dict(text="Number of DCFC Stations (N)", font=dict(size=16)),
-        yaxis_title=dict(text="WTP per Traveler ($/BEV)", font=dict(size=16)),
-        xaxis=dict(tickfont=dict(size=13)),
+        yaxis_title=dict(text="WTP per BEV ($/BEV)", font=dict(size=16)),
+        xaxis=dict(tickfont=dict(size=13), range=[0, N_current * 1.08]),
         yaxis=dict(tickfont=dict(size=13)),
         template="plotly_white",
         height=560,
@@ -1935,27 +1859,27 @@ def render_14():
     )
 
     st.plotly_chart(fig, width="stretch")
-    
-    st.caption(f"Scenario settings: r={r_percent:.1f}%, R={R_baseline} mi (fixed)")
 
-    # Updated Range Display for Section 1.4
+    st.caption(f"Scenario settings: r={r_percent:.1f}%, detour buffer δ={delta:g} mi (fixed), "
+               f"15-year lifetime. Curve follows the expected VMT coverage in 1.3.")
+
     c1, c2, c3 = st.columns(3)
 
     # 1. Main Metric
-    c1.metric("Current WTP / traveler (base)", f"${per_current:,.0f}")
+    c1.metric("Current WTP / BEV (base)", f"${per_current:,.0f}")
 
-    # 2. Cleaned Range (Removing the green box)
+    # 2. Range
     with c2:
         st.markdown(f"**Range**")
         st.markdown(
             f"<div style='font-size: 1.8rem; font-weight: 400; color: var(--illini-blue); margin-top: -10px;'>"
             f"[ ${per_current_low:,.0f} – ${per_current_high:,.0f} ]"
-            f"</div>", 
+            f"</div>",
             unsafe_allow_html=True
         )
 
     # 3. Discount Factor
-    c3.metric("Discount factor D (15y)", f"{calculate_discount_factor(r, 15):.2f}")
+    c3.metric("Discount factor D (15y)", f"{D:.2f}")
 
 
 # ── Main body: overview, then each section (text + visual together) ─────────
